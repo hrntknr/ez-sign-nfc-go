@@ -93,14 +93,8 @@ go run ./example/cmd/ezsigncli \
   -product 4.2-4c
 ```
 
-- `checker`
-
-![checker](docs/images/pattern-checker.jpg)
-
-- `hstripe`
-
-![hstripe](docs/images/pattern-hstripe.jpg)
-
-- `vstripe`
-
-![vstripe](docs/images/pattern-vstripe.jpg)
+<p align="center">
+  <img src="docs/images/pattern-checker.jpg" alt="checker" width="32%" />
+  <img src="docs/images/pattern-hstripe.jpg" alt="hstripe" width="32%" />
+  <img src="docs/images/pattern-vstripe.jpg" alt="vstripe" width="32%" />
+</p>

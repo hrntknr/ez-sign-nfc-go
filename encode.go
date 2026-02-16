@@ -3,6 +3,7 @@ package ezsignnfc
 import (
 	"fmt"
 	"image"
+	"math"
 )
 
 // ImageEncodeOptions configures image quantization behavior.
@@ -63,6 +64,7 @@ func QuantizeImageToPixels(profile Profile, img image.Image) []uint8 {
 // QuantizeImageToPixelsWithOptions resizes/crops and quantizes to indexed colors with options.
 func QuantizeImageToPixelsWithOptions(profile Profile, img image.Image, opts ImageEncodeOptions) []uint8 {
 	prepared := ResizeCropNearest(img, profile.Width, profile.Height)
+	prepared = enhanceForEpaper(profile, prepared)
 	if opts.Dither {
 		return quantizeImageToPixelsDither(profile, prepared)
 	}
@@ -99,12 +101,21 @@ func quantizeImageToPixelsDither(profile Profile, img *image.NRGBA) []uint8 {
 
 	pixels := make([]uint8, size)
 	for y := 0; y < height; y++ {
-		for x := 0; x < width; x++ {
+		xStart := 0
+		xEnd := width
+		step := 1
+		if y%2 == 1 {
+			xStart = width - 1
+			xEnd = -1
+			step = -1
+		}
+
+		for x := xStart; x != xEnd; x += step {
 			i := y*width + x
 			r := clampByteFloat(rs[i])
 			g := clampByteFloat(gs[i])
 			b := clampByteFloat(bs[i])
-			c := nearestPaletteIndexRGB(palette, r, g, b)
+			c := nearestPaletteIndex(profile, r, g, b)
 			pixels[i] = c
 
 			pc := palette[int(c)]
@@ -122,10 +133,17 @@ func quantizeImageToPixelsDither(profile Profile, img *image.NRGBA) []uint8 {
 				bs[ni] += eb * factor
 			}
 
-			diffuse(x+1, y, 7.0/16.0)
-			diffuse(x-1, y+1, 3.0/16.0)
-			diffuse(x, y+1, 5.0/16.0)
-			diffuse(x+1, y+1, 1.0/16.0)
+			if step == 1 {
+				diffuse(x+1, y, 7.0/16.0)
+				diffuse(x-1, y+1, 3.0/16.0)
+				diffuse(x, y+1, 5.0/16.0)
+				diffuse(x+1, y+1, 1.0/16.0)
+			} else {
+				diffuse(x-1, y, 7.0/16.0)
+				diffuse(x+1, y+1, 3.0/16.0)
+				diffuse(x, y+1, 5.0/16.0)
+				diffuse(x-1, y+1, 1.0/16.0)
+			}
 		}
 	}
 	return pixels
@@ -139,6 +157,108 @@ func clampByteFloat(v float64) uint8 {
 		return 255
 	}
 	return uint8(v + 0.5)
+}
+
+func enhanceForEpaper(profile Profile, src *image.NRGBA) *image.NRGBA {
+	const (
+		lowPercent  = 0.10
+		highPercent = 0.90
+	)
+
+	const gamma = 0.90
+	satBoost := 1.0
+	if profile.BitsPerPixel == 2 {
+		satBoost = 1.5
+	}
+
+	w := src.Bounds().Dx()
+	h := src.Bounds().Dy()
+	if w == 0 || h == 0 {
+		return src
+	}
+
+	hist := [256]int{}
+	total := w * h
+	for y := 0; y < h; y++ {
+		row := src.Pix[y*src.Stride:]
+		for x := 0; x < w; x++ {
+			i := x * 4
+			l := lumaByte(row[i+0], row[i+1], row[i+2])
+			hist[int(l)]++
+		}
+	}
+
+	lowTarget := int(float64(total) * lowPercent)
+	highTarget := int(float64(total) * highPercent)
+	low := 0
+	high := 255
+	cum := 0
+	for i := 0; i < 256; i++ {
+		cum += hist[i]
+		if cum >= lowTarget {
+			low = i
+			break
+		}
+	}
+	cum = 0
+	for i := 0; i < 256; i++ {
+		cum += hist[i]
+		if cum >= highTarget {
+			high = i
+			break
+		}
+	}
+	if high <= low {
+		return src
+	}
+
+	dst := image.NewNRGBA(src.Bounds())
+	scale := 255.0 / float64(high-low)
+	for y := 0; y < h; y++ {
+		srcRow := src.Pix[y*src.Stride:]
+		dstRow := dst.Pix[y*dst.Stride:]
+		for x := 0; x < w; x++ {
+			i := x * 4
+			r := applyLevels(srcRow[i+0], low, scale, gamma)
+			g := applyLevels(srcRow[i+1], low, scale, gamma)
+			b := applyLevels(srcRow[i+2], low, scale, gamma)
+
+			if satBoost > 1.0 {
+				gray := (float64(r) + float64(g) + float64(b)) / 3.0
+				r = clampByteFloat(gray + (float64(r)-gray)*satBoost)
+				g = clampByteFloat(gray + (float64(g)-gray)*satBoost)
+				b = clampByteFloat(gray + (float64(b)-gray)*satBoost)
+			}
+
+			dstRow[i+0] = r
+			dstRow[i+1] = g
+			dstRow[i+2] = b
+			dstRow[i+3] = srcRow[i+3]
+		}
+	}
+	return dst
+}
+
+func applyLevels(v uint8, low int, scale float64, gamma float64) uint8 {
+	normalized := (float64(int(v)-low) * scale) / 255.0
+	if normalized < 0 {
+		normalized = 0
+	}
+	if normalized > 1 {
+		normalized = 1
+	}
+	return clampByteFloat(255.0 * math.Pow(normalized, gamma))
+}
+
+func lumaByte(r, g, b uint8) uint8 {
+	y := (77*int(r) + 150*int(g) + 29*int(b)) >> 8
+	if y < 0 {
+		return 0
+	}
+	if y > 255 {
+		return 255
+	}
+	return uint8(y)
 }
 
 // ResizeCropNearest scales with aspect-ratio preservation and center-crops.
@@ -252,7 +372,7 @@ func packRow2bppRightToLeft(profile Profile, row []uint8) []byte {
 			if x >= 0 && x < len(row) {
 				px = row[x]
 			}
-			v |= (px & 0x03) << uint(2*nib)
+			v |= (px & 0x03) << uint(6-2*nib)
 			pixel++
 		}
 		out[bi] = v
